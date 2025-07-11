@@ -5,6 +5,7 @@ import sys
 import time
 from typing import List, Optional
 
+from uuid import UUID
 import ipywidgets as widgets
 import openstack
 import requests
@@ -442,7 +443,7 @@ def choose_site(default: str = None) -> None:
     else:
         print("Choose site feature is only available in an ipynb environment.")
 
-def use_lease_id(lease_id: str) -> None:
+def use_lease_id(lease_id: str, verbose: bool = True) -> None:
     """
     Sets the current lease ID to use in the global context.
 
@@ -452,19 +453,30 @@ def use_lease_id(lease_id: str) -> None:
 
     Args:
         lease_id (str): The ID of the lease to use.
+        verbose (bool, optional): Whether to print a confirmation message. Defaults to True.
+
+    Raises:
+        CHIValueError: If the lease ID is not a valid UUID string.
     """
     global _lease_id
 
-    if not re.fullmatch(r"[A-Za-z0-9\-]+", lease_id):
-        raise CHIValueError(f'Lease ID "{lease_id}" is invalid. It must contain only letters, numbers, and hyphens with no spaces or special characters.')
+    try:
+        UUID(lease_id)  # raises ValueError if invalid
+    except ValueError:
+        raise CHIValueError(f'Lease ID "{lease_id}" is not a valid UUID.')
 
     _lease_id = lease_id
 
-    print(f"Now using lease with ID {lease_id}.")
+    if verbose:
+        print(f"Now using lease with ID {lease_id}.")
 
-def get_lease_id():
+
+def get_lease_id(verbose: bool = True):
     """
     Returns the currently active lease ID, if one has been set.
+
+    Args:
+        verbose (bool, optional): Whether to print the current lease ID. Defaults to True.
 
     Returns:
         str or None: The lease ID currently in use, or None if no lease has been selected.
