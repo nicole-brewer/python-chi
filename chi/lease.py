@@ -5,11 +5,12 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, List, Optional, Union
+from uuid import UUID
 
 import pandas
 from blazarclient.exception import BlazarClientException
-from functools import partial
 from ipydatagrid import DataGrid, Expr, TextRenderer
 from IPython.display import display
 from ipywidgets import HTML, Box, Layout, Output, VBox
@@ -368,17 +369,11 @@ class Lease:
                     )
                 )
         if self.user_id:
-            user_id = connection().current_user_id
-            if self.user_id == user_id:
-                label = os.getenv("OS_USERNAME")
-                children.append(
-                    HTML(f"<b>User Name:</b> {label}", style=style, layout=layout)
-                )
-            else:
-                label = self.user_id  # [:8]  # or just show a truncated ID
-                children.append(
-                    HTML(f"<b>User ID:</b> {label}", style=style, layout=layout)
-                )
+            label = _resolve_user_label(self.user_id)
+            children.append(
+                HTML(f"<b>User:</b> {label}", style=style, layout=layout)
+            )
+
         if self.created_at:
             children.append(
                 HTML(
@@ -789,7 +784,6 @@ class Lease:
             )
         return flavors
 
-
 def _format_resource_properties(user_constraints, extra_constraints):
     if user_constraints:
         if user_constraints[0] == "and":
@@ -1022,6 +1016,24 @@ def _reservation_matching(lease_ref, match_fn, multiple=False):
             raise ResourceError("Multiple matching reservations found")
         return matches[0]
 
+def _resolve_user_label(user_id: str) -> str:
+    """
+    Returns a human-friendly label for a user ID.
+
+    If the user ID matches the current user's ID, returns OS_USERNAME
+    from the environment if available. Otherwise, returns the raw user ID.
+
+    Args:
+        user_id (str): The ID of the user to label.
+
+    Returns:
+        str: A user-friendly label for the user.
+    """
+    if user_id == connection().current_user_id:
+        return os.getenv("OS_USERNAME", user_id)
+    return user_id
+
+
 
 def add_network_reservation(
     reservation_list,
@@ -1216,13 +1228,17 @@ def _status_color(cell):
            "#ffe599" if cell.value == "1-PENDING" else (
            "#f69084" if cell.value == "3-TERMINATED" else "#e0e0e0"))
     
-def show_leases() -> DataGrid:
+def show_leases(leases: Optional[List[Lease]] = None) -> DataGrid:
     """
     Displays a table of the user's leases in an interactive, sortable format.
 
     Uses an ipydatagrid to present key lease attributes such as ID, name, status,
     duration, and reservation counts. The grid supports sorting, filtering, and 
     scrolling for easy exploration of lease state.
+
+    Args:
+        leases (Optional[List[Lease]]): A list of Lease objects to display.
+            If None, the full list of leases will be retrieved.
 
     Returns:
         DataGrid: An ipydatagrid widget displaying the leases.
@@ -1234,8 +1250,8 @@ def show_leases() -> DataGrid:
         max_chars = df[column].astype(str).map(len).max()
         return max(max_chars * char_px + padding, 80)
 
-
-    leases = list_leases()
+    if leases is None:
+        leases = list_leases()
 
     rows = []
     for lease in leases:
@@ -1244,11 +1260,8 @@ def show_leases() -> DataGrid:
             project_name = context.get_project_name(lease.project_id)
         except ResourceError:
             project_name = lease.project_id[:8] if lease.project_id else "Unknown"
-    
-        if lease.user_id == connection().current_user_id:
-            user_label = os.getenv("OS_USERNAME")
-        else:
-            user_label = lease.user_id if lease.user_id else "Unknown"
+
+        user_label = _resolve_user_label(lease.user_id)
     
         if lease.start_date and lease.end_date:
             duration_hrs = round((lease.end_date - lease.start_date).total_seconds() / 3600, 1)
@@ -1323,28 +1336,27 @@ def show_leases() -> DataGrid:
         },
         renderers=renderers
     )
-
-    MAX_ROWS = 10
-    ROW_HEIGHT = 32  # pixels
-    HEADER_HEIGHT = 32
-    num_rows = min(len(rows), MAX_ROWS)
-    estimated_height = num_rows * ROW_HEIGHT + HEADER_HEIGHT
     
-    #grid.layout.height = f"{200}px"
     return grid
 
-def select_lease() -> DataGrid:
+def select_lease(leases: Optional[List[Lease]] = None) -> VBox:
     """
-    Displays the lease table and attaches a row-selection callback.
+    Displays an interactive lease table and allows the user to select one lease.
+
+    If a list of leases is provided, only those leases are shown. Otherwise, all
+    leases are listed.
 
     Args:
-        callback (Callable[[dict], None]): Function to call when a row is selected.
+        leases (Optional[List[Lease]]): A list of Lease objects to display for selection.
+            If None, all available leases are shown.
 
     Returns:
-        DataGrid: The interactive lease table with selection enabled.
+        VBox: A widget containing the DataGrid and selection output.
     """
-    
-    grid = show_leases()
+    if leases is not None:
+        grid = show_leases(leases=leases)
+    else:
+        grid = show_leases()
     grid.selection_mode = "row"
     output = Output()
     vbox = VBox(children=(grid, output))
@@ -1360,7 +1372,7 @@ def select_lease() -> DataGrid:
         else:
             selected_row = grid._data['data'].iloc[row_index]
             lease_id = selected_row["Lease ID"]
-            context.use_lease_id(lease_id) 
+            use_lease(lease_id, verbose=False)
             lease_name = selected_row["Name"]
             output.clear_output()
             with output:
@@ -1439,6 +1451,44 @@ def get_lease_id(lease_name) -> str:
     elif len(matching) > 1:
         raise ResourceError(f"Multiple leases found for name {lease_name}")
     return matching[0]["id"]
+
+def use_lease(lease: Union[str, Lease], verbose: bool = True) -> None:
+    """
+    Set the active lease by ID or by passing a Lease object.
+
+    This function performs validation to ensure the lease exists before setting it.
+    Lease names are no longer accepted. For selecting a lease by name, use
+    `get_lease_id` followed by `use_lease_id`.
+
+    Args:
+        lease (Union[str, Lease]): A lease ID (UUID string) or a Lease object.
+        verbose (bool, optional): Whether to print a confirmation message. Defaults to True.
+
+    Raises:
+        ValueError: If the lease could not be found in the current list.
+        TypeError: If the input is not a string or Lease object.
+    """
+    leases = list_leases()
+
+    if isinstance(lease, str):
+        try:
+            UUID(lease)  # validate format
+        except ValueError:
+            raise TypeError("Lease names are not supported. Use a lease ID or Lease object.")
+        matching_lease = next((_lease for _lease in leases if _lease.id == lease), None)
+        if not matching_lease:
+            raise ValueError(f"No lease found with ID '{lease}'. Has it been deleted?")
+    elif isinstance(lease, Lease):
+        matching_lease = next((_lease for _lease in leases if _lease.id == lease.id), None)
+        if not matching_lease:
+            raise ValueError(f"No lease found with ID '{lease.id}'. Has it been deleted?")
+    else:
+        raise TypeError(f"Expected lease to be a str (UUID) or Lease object, got {type(lease).__name__}")
+
+    context.use_lease_id(matching_lease.id, verbose=False)
+
+    if verbose:
+        print(f"Using lease '{matching_lease.name}' (ID: {matching_lease.id})")
 
 
 def create_lease(lease_name, reservations=[], start_date=None, end_date=None):
