@@ -5,19 +5,20 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import pandas
 from blazarclient.exception import BlazarClientException
 from ipydatagrid import DataGrid, Expr, TextRenderer
 from IPython.display import display
-from ipywidgets import HTML, Box, Layout
+from ipywidgets import HTML, Box, Layout, Output, VBox
 from packaging.version import Version
 
 from chi import context, server, util
 
 from .clients import blazar, connection
-from .context import _is_ipynb, get_project_name
+from .context import _is_ipynb
 from .exception import CHIValueError, ResourceError, ServiceError
 from .hardware import Device, Node
 from .network import PUBLIC_NETWORK, get_network_id, list_floating_ips
@@ -367,7 +368,7 @@ class Lease:
                     )
                 )
         if self.user_id:
-            user_id = connection().get_user_id()
+            user_id = connection().current_user_id
             if self.user_id == user_id:
                 label = os.getenv("OS_USERNAME")
                 children.append(
@@ -1246,7 +1247,7 @@ def show_leases() -> DataGrid:
     rows = []
     for lease in leases:
         try:
-            project_name = get_project_name(lease.project_id)
+            project_name = context.get_project_name(lease.project_id)
         except ResourceError:
             project_name = lease.project_id[:8] if lease.project_id else "Unknown"
 
@@ -1319,28 +1320,91 @@ def show_leases() -> DataGrid:
         ),
     }
 
-    display(
-        DataGrid(
-            df,
-            layout={"height": "400px", "width": "100%"},
-            column_widths={
-                "key": 30,
-                "Name": int(estimate_column_width(df, "Name")),
-                "Status": 120,
-                "Remaining": 80,
-                "Total Hours": 50,
-                "# Nodes": 30,
-                "# FIPs": 30,
-                "Project": 100,
-                "User": 75,
-                "Start": 95,
-                "End": 95,
-                "Created": 95,
-                "Lease ID": 30,
-            },
-            renderers=renderers,
-        )
+    grid = DataGrid(
+        df,
+        layout={'width': '100%', 'height': '250px', 'max_height': '100%'},
+        column_widths={
+            "key": 30,
+            "Name": int(estimate_column_width(df, "Name")),
+            "Status": 120,
+            "Remaining": 80,
+            "Total Hours": 50,
+            "# Nodes": 30,
+            "# FIPs": 30,
+            "Project": 100,
+            "User": 75,
+            "Start": 95,
+            "End": 95,
+            "Created": 95,
+            "Lease ID": 30,
+        },
+        renderers=renderers,
     )
+
+    return grid
+
+
+def select_lease() -> DataGrid:
+    """
+
+
+    Displays the lease table and attaches a row-selection callback.
+
+
+
+
+
+    Args:
+
+
+        callback (Callable[[dict], None]): Function to call when a row is selected.
+
+
+
+
+
+    Returns:
+
+
+        DataGrid: The interactive lease table with selection enabled.
+
+
+    """
+    grid = show_leases()
+
+    grid.selection_mode = "row"
+
+    output = Output()
+
+    vbox = VBox(children=(grid, output))
+
+    def on_selection(grid, change):
+
+        row_index = change['new'][0]['r1']
+
+        row_end = change['new'][0]['r2']
+
+        if row_index - row_end != 0:
+
+            output.clear_output()
+
+            with output:
+
+                print("Please select only one row.")
+        else:
+            selected_row = grid._data['data'].iloc[row_index]
+            lease_id = selected_row["Lease ID"]
+            context.use_lease_id(lease_id)
+            lease_name = selected_row["Name"]
+            output.clear_output()
+
+            with output:
+                print(f"Active lease set to {lease_name} ({lease_id})")
+
+    on_selection_with_grid = partial(on_selection, grid)
+    grid.observe(on_selection_with_grid, names='selections')
+
+    return vbox
 
 
 def _get_lease_from_blazar(ref: str):
